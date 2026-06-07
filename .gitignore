@@ -1,0 +1,15 @@
+.pio
+.dummy
+.vscode
+.env
+build
+logs
+managed_components
+dependencies.lock
+src/credentials.h
+*cache
+*backup
+*autosave
+icon.gif
+icon.jpg
+icon.png
