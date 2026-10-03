@@ -136,6 +136,20 @@ const byte SX1509_BUTTON_PIN = 13;   // Orange Wire
 const byte SX1509_REED_PIN = 12;     // Brown Wire
 const byte SX1509_PIR2_PIN = 11;     // Black Wire (PIR inside the room)
 
+#define KEY_ROWS 4
+#define KEY_COLS 3
+
+byte rowPins[KEY_ROWS] = {5, 0, 1, 3};
+byte colPins[KEY_COLS] = {4, 6, 2};
+
+char keyMap[KEY_ROWS][KEY_COLS] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
+
+//pin6 - col1, pin5 - row0, pin4 - col0, pin3 - row3, pin2 - col2, pin1 - row2, pin0 - row1
 
 //-----------------------------------------Button Variables
 
@@ -148,6 +162,17 @@ unsigned long last_btn_press_time;
 bool UnlockDoor_Now = false;
 bool UnlockingStarted = false;
 unsigned long UnlockingStarted_Time;
+
+//-----------------------------------------Intercom Stuff
+
+#define SAMPLE_RATE 16000
+
+#define ADC_MIC_CHANNEL ADC1_CHANNEL_6
+
+// In case all transport packets need a header (to avoid interference with other applications or walkie talkie sets), 
+// specify TRANSPORT_HEADER_SIZE (the length in bytes of the header) in the next line, and define the transport header
+#define TRANSPORT_HEADER_SIZE 3
+uint8_t transport_header[TRANSPORT_HEADER_SIZE] = {0x1F, 0xCD, 0x01};
 
 //-----------------------------------------Pins
 

@@ -28,6 +28,7 @@
 
 #include <Adafruit_NeoPixel.h>
 #include <SparkFunSX1509.h>
+#include "Keypad_SX1509.h"
 
 #include "DFRobot_VL53L0X.h"
 #include <Thinary_AHT10.h>
@@ -36,9 +37,39 @@
 #include <WiFiClient.h>
 #include <ArduinoHA.h>
 
+#include <driver/i2s.h>
+#include <driver/gpio.h>
+#include "ADCSampler.h"
+#include "I2SOutput.h"
+#include "UdpTransport.h"
+#include "OutputBuffer.h"
+
 #include "credentials.h"
 #include "definitions.h"
 #include "AdiWiFiManager.h"
+
+// I2S Config for using the Internal ADC
+i2s_config_t i2s_adc_config = {
+  .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
+  .sample_rate = SAMPLE_RATE,
+  .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+  .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+  .communication_format = I2S_COMM_FORMAT_STAND_MSB,
+  .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+  .dma_buf_count = 4,
+  .dma_buf_len = 64,
+  .use_apll = false,
+  .tx_desc_auto_clear = false,
+  .fixed_mclk = 0
+};
+
+// I2S Speaker Pins
+i2s_pin_config_t i2s_speaker_pins = {
+  .bck_io_num = I2S_BCLK,
+  .ws_io_num = I2S_LRC,
+  .data_out_num = I2S_DOUT,
+  .data_in_num = I2S_PIN_NO_CHANGE
+};
 
 uint32_t miredsToColor(uint16_t mireds);
 bool matrixAlertBusy();
@@ -58,6 +89,7 @@ void loop();
 void HA_MQTT_Init();
 void onMqttDisconnected();
 void HAButtonsHandler(HAButton* sender);
+void HASwitchHandler(bool state, HASwitch* sender);
 
 uint16_t matrixXY(uint8_t x, uint8_t y);
 void matrixClear();
@@ -90,6 +122,11 @@ void Hall_PIR2_Alert(bool state);
 void Door_Lidar_Alert(bool state);
 void LockHandler();
 
+void Keypad_Handler();
+
+void Intercom_Init();
+void Intercom_Task(void *param);
+
 Preferences preferences;
 AdiWiFiManager WiFiManager;
 TFT_eSPI tft = TFT_eSPI();
@@ -102,6 +139,13 @@ DFRobot_VL53L0X LIDAR;
 WiFiClient client;
 HADevice device;
 HAMqtt mqtt(client, device);
+
+Keypad_SX1509 keypad(makeKeymap(keyMap), rowPins, colPins, KEY_ROWS, KEY_COLS, ExtraIO);
+
+Output *m_output;
+I2SSampler *m_input;
+Transport *m_transport;
+OutputBuffer *m_output_buffer;
 
 //------------------------------------------- Home Assistant Stuff
 
@@ -124,6 +168,9 @@ HASwitch lstair_pres_alert("lstair_pres_alert");
 HASwitch ustair_pres_alert("ustair_pres_alert");
 HASwitch ustair_lidar_alert("ustair_lidar_alert");
 HASwitch hall_pir1_alert("hall_pir1_alert");
+
+HASwitch Buzzer1CMD("buzzer1");
+HASwitch Buzzer2CMD("buzzer2");
 
 HALight DoorlockRGBCMD("doorlock_rgb", HALight::BrightnessFeature | HALight::ColorTemperatureFeature | HALight::RGBFeature);
 HALight MatrixRGBCMD("matrix_rgb", HALight::BrightnessFeature | HALight::ColorTemperatureFeature | HALight::RGBFeature);
@@ -588,7 +635,7 @@ void LIDAR_Handler()
   lidar_last_reading = dist;
 
   #if SERIAL_DEBUG != 0
-    Serial.printf("LIDAR_Handler - dist=%d mm  baseline=%d mm  delta=%d  present=%s\n", dist, lidar_baseline, delta_from_baseline, LIDAR_presence ? "YES" : "no");
+    //Serial.printf("LIDAR_Handler - dist=%d mm  baseline=%d mm  delta=%d  present=%s\n", dist, lidar_baseline, delta_from_baseline, LIDAR_presence ? "YES" : "no");
   #endif
 }
 
@@ -866,12 +913,15 @@ void setup() {
       printLog("SX1509 Init Successful");
 
       ExtraIO.pinMode(SX1509_PIR1_PIN, INPUT);
-      ExtraIO.pinMode(SX1509_BUZZER1_PIN, ANALOG_OUTPUT);
-      ExtraIO.pinMode(SX1509_BUZZER2_PIN, ANALOG_OUTPUT);
+      ExtraIO.pinMode(SX1509_BUZZER1_PIN, OUTPUT);
+      ExtraIO.pinMode(SX1509_BUZZER2_PIN, OUTPUT);
       ExtraIO.pinMode(SX1509_LOCK_PIN, OUTPUT, HIGH);
       ExtraIO.pinMode(SX1509_BUTTON_PIN, INPUT_PULLUP);
       ExtraIO.pinMode(SX1509_REED_PIN, INPUT_PULLUP);
       ExtraIO.pinMode(SX1509_PIR2_PIN, INPUT);
+
+      //ExtraIO.ledDriverInit(SX1509_BUZZER1_PIN, 2000, false);
+      //ExtraIO.ledDriverInit(SX1509_BUZZER2_PIN, 2000, false);
 
       ExtraIO.digitalWrite(SX1509_LOCK_PIN, HIGH);
     }
@@ -918,6 +968,10 @@ void setup() {
     doorlockFX.begin(Doorlock_LEDS, DOORLOCKLEDS_NUM);
     matrixFX.begin2D(Matrix_LEDS, MATRIX_LEDS_NUM, MATRIX_W, MATRIX_H, matrixXY);
 
+    DEBUG_PRINTLN("setup - Initializing Intercom..");
+    printLog("Initializing Intercom..");
+    Intercom_Init();
+
     DEBUG_PRINTLN("setup - Device Setup Complete");
     printLog("Device Setup Complete");
 
@@ -938,6 +992,7 @@ void loop() {
     AHT10_Handler();
     Reed_Handler();
     Button_Handler();
+    Keypad_Handler();
     LockHandler();
 
     doorlockFX.update();
@@ -1035,6 +1090,14 @@ void HA_MQTT_Init() {
   hall_pir1_alert.setIcon("mdi:alert-box");
   hall_pir1_alert.onCommand(Hall_PIR1_Alert);
 
+  Buzzer1CMD.setName("Buzzer 1");
+  Buzzer1CMD.setIcon("mdi:bell");
+  Buzzer1CMD.onCommand(HASwitchHandler);
+
+  Buzzer2CMD.setName("Buzzer 2");
+  Buzzer2CMD.setIcon("mdi:bell");
+  Buzzer2CMD.onCommand(HASwitchHandler);
+
   DoorlockRGBCMD.setName("Doorlock RGB Strip");
   DoorlockRGBCMD.setBrightnessScale(100);
   DoorlockRGBCMD.setMinMireds(153);
@@ -1113,6 +1176,38 @@ void HAButtonsHandler(HAButton* sender)
     DEBUG_PRINTLN("HAButtonsHandler - Unlock Command Received");
     UnlockDoor_Now = true;
   } 
+}
+
+void HASwitchHandler(bool state, HASwitch* sender)
+{
+  if(sender == &Buzzer1CMD) 
+  {
+    if(state) 
+    {
+      ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, HIGH);
+      DEBUG_PRINTLN("HASwitchHandler - Buzzer 1 ON");
+    } 
+    else 
+    {
+      ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, LOW);
+      DEBUG_PRINTLN("HASwitchHandler - Buzzer 1 OFF");
+    }
+  }
+  else if(sender == &Buzzer2CMD) 
+  {
+    if(state) 
+    {
+      ExtraIO.digitalWrite(SX1509_BUZZER2_PIN, HIGH);
+      DEBUG_PRINTLN("HASwitchHandler - Buzzer 2 ON");
+    } 
+    else 
+    {
+      ExtraIO.digitalWrite(SX1509_BUZZER2_PIN, LOW);
+      DEBUG_PRINTLN("HASwitchHandler - Buzzer 2 OFF");
+    }
+  }
+
+  sender->setState(state); // report state back to the Home Assistant
 }
 
 //========================================================================================================================================
@@ -1429,5 +1524,105 @@ void LockHandler() {
     ExtraIO.digitalWrite(SX1509_BUZZER2_PIN, LOW);
 
     DEBUG_PRINTLN("LockHandler - Buzzer off!");
+  }
+}
+
+//========================================================================================================================================
+//======================= GUI and Input Functions ========================
+//========================================================================================================================================
+
+void Keypad_Handler() {
+  char key = keypad.getKey();
+  if(key != NO_KEY) {
+    Serial.println(key);
+    DEBUG_PRINTLN("Keypad_Handler - Key Pressed: " + String(key));
+  }
+}
+
+//========================================================================================================================================
+//======================= Intercom Functions ========================
+//========================================================================================================================================
+
+void Intercom_Init() {
+  m_output_buffer = new OutputBuffer(300 * 16);
+  m_input = new ADCSampler(ADC_UNIT_1, ADC_MIC_CHANNEL, i2s_adc_config);
+  m_output = new I2SOutput(I2S_NUM_1, i2s_speaker_pins);
+  m_transport = new UdpTransport(m_output_buffer);
+  m_transport->set_header(TRANSPORT_HEADER_SIZE, transport_header);
+
+  m_transport->begin();
+  m_output->start(SAMPLE_RATE);
+  m_output_buffer->flush();
+
+  xTaskCreatePinnedToCore(Intercom_Task,  "Intercom_Task", 8192, NULL, 1, NULL, 0);
+}
+
+void Intercom_Task(void *param) {
+
+  int16_t *samples = reinterpret_cast<int16_t *>(malloc(sizeof(int16_t) * 128));
+
+  while(true)
+  {
+    // do we need to start transmitting?
+    if(digitalRead(DevBTN))//todo must be moved to a keypad button or something 
+    {
+      DEBUG_PRINTLN("Intercom_Task - Started transmitting");
+
+      // stop the output as we're switching into transmit mode
+      m_output->stop();
+
+      tft.startWrite();           // take the TFT bus mutex
+      gpio_reset_pin(GPIO_NUM_4); // detach from TFT_WR function
+      gpio_set_direction(GPIO_NUM_4, GPIO_MODE_INPUT);
+
+      // start the input to get samples from the microphone
+      m_input->start();
+
+      // transmit for at least 1 second or while the button is pushed
+      unsigned long start_time = millis();
+      while (millis() - start_time < 1000 || digitalRead(DevBTN))
+      {
+        // read samples from the microphone
+        int samples_read = m_input->read(samples, 128);  
+
+        // debug: print min/max of what mic gives us
+        int16_t mn = 32767, mx = -32768;
+        for (int i = 0; i < samples_read; i++) {
+            if (samples[i] < mn) mn = samples[i];
+            if (samples[i] > mx) mx = samples[i];
+        }
+        Serial.printf("Mic: read=%d min=%d max=%d\n", samples_read, mn, mx);
+
+
+        // and send them over the transport
+        for (int i = 0; i < samples_read; i++)
+        {
+          m_transport->add_sample(samples[i]);
+        }
+      }
+      // send all packets still in the transport buffer
+      m_transport->flush();
+
+      // finished transmitting stop the input and start the output
+      DEBUG_PRINTLN("Intercom_Task - Finished transmitting");
+      m_input->stop();
+
+      gpio_reset_pin(GPIO_NUM_4);
+      tft.endWrite(); // release TFT bus mutex
+
+      m_output->start(SAMPLE_RATE);
+    }
+    // while the transmit button is not pushed and 1 second has not elapsed
+    DEBUG_PRINTLN("Intercom_Task - Started Receiving");
+    unsigned long start_time = millis();
+    while(millis() - start_time < 1000 || !digitalRead(DevBTN))
+    {
+      // read from the output buffer (which should be getting filled by the transport)
+      m_output_buffer->remove_samples(samples, 128);
+
+      // and send the samples to the speaker
+      m_output->write(samples, 128);
+    }
+    DEBUG_PRINTLN("Intercom_Task - Finished Receiving");
   }
 }
