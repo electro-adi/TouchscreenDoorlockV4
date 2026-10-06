@@ -51,13 +51,13 @@
 // I2S Config for using the Internal ADC
 i2s_config_t i2s_adc_config = {
   .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
-  .sample_rate = SAMPLE_RATE,
+  .sample_rate = (uint32_t)(SAMPLE_RATE / ADC_RATE_DIVIDER),
   .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
   .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
   .communication_format = I2S_COMM_FORMAT_STAND_MSB,
   .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-  .dma_buf_count = 4,
-  .dma_buf_len = 64,
+  .dma_buf_count = 8,
+  .dma_buf_len = 256,
   .use_apll = false,
   .tx_desc_auto_clear = false,
   .fixed_mclk = 0
@@ -115,6 +115,7 @@ void MatrixRGB_Effect(int8_t index, HASelect* sender);
 
 void Gate_Opened_Alert(bool state, HASwitch* sender);
 void LStair_Presence_Alert(bool state, HASwitch* sender);
+void LStair_Cbell_Alert(bool state, HASwitch* sender);
 void UStair_Presence_Alert(bool state, HASwitch* sender);
 void UStair_Lidar_Alert(bool state, HASwitch* sender);
 void Hall_PIR1_Alert(bool state, HASwitch* sender);
@@ -122,7 +123,7 @@ void Hall_PIR2_Alert(bool state);
 void Door_Lidar_Alert(bool state);
 void LockHandler();
 
-void Keypad_Handler();
+void keyEventListener(KeypadEvent key, KeyState kpadState);
 
 void Intercom_Init();
 void Intercom_Task(void *param);
@@ -151,8 +152,8 @@ OutputBuffer *m_output_buffer;
 
 HAButton DevModeCMD("dev_mode_btn");
 HAButton RebootCMD("reboot_btn");
-HAButton MuteCMD("mute_btn");
 HAButton UnlockDoorCMD("unlock_door_btn");
+HAButton StopSoundsCMD("stop_sounds");
 
 HABinarySensor PIR1("hallway_presence");
 HABinarySensor PIR2("adi_room_presence");
@@ -165,12 +166,16 @@ HASensorNumber Humd("hall_humd");
 
 HASwitch gate_opened_alert("gate_opened_alert");
 HASwitch lstair_pres_alert("lstair_pres_alert");
+HASwitch lstair_cbell_alert("lstair_cbell_alert");
 HASwitch ustair_pres_alert("ustair_pres_alert");
 HASwitch ustair_lidar_alert("ustair_lidar_alert");
 HASwitch hall_pir1_alert("hall_pir1_alert");
 
 HASwitch Buzzer1CMD("buzzer1");
 HASwitch Buzzer2CMD("buzzer2");
+HASwitch MuteCMD("mute");
+HASwitch DisMAlertsCMD("disable_m_alerts");
+HASwitch DisDAlertsCMD("disable_d_alerts");
 
 HALight DoorlockRGBCMD("doorlock_rgb", HALight::BrightnessFeature | HALight::ColorTemperatureFeature | HALight::RGBFeature);
 HALight MatrixRGBCMD("matrix_rgb", HALight::BrightnessFeature | HALight::ColorTemperatureFeature | HALight::RGBFeature);
@@ -920,10 +925,9 @@ void setup() {
       ExtraIO.pinMode(SX1509_REED_PIN, INPUT_PULLUP);
       ExtraIO.pinMode(SX1509_PIR2_PIN, INPUT);
 
-      //ExtraIO.ledDriverInit(SX1509_BUZZER1_PIN, 2000, false);
-      //ExtraIO.ledDriverInit(SX1509_BUZZER2_PIN, 2000, false);
-
       ExtraIO.digitalWrite(SX1509_LOCK_PIN, HIGH);
+
+      keypad.addStatedEventListener(keyEventListener);
     }
 
     delay(200);
@@ -973,6 +977,7 @@ void setup() {
     Intercom_Init();
 
     DEBUG_PRINTLN("setup - Device Setup Complete");
+    DEBUG_PRINTLN("");
     printLog("Device Setup Complete");
 
     delay(1000);
@@ -992,8 +997,9 @@ void loop() {
     AHT10_Handler();
     Reed_Handler();
     Button_Handler();
-    Keypad_Handler();
     LockHandler();
+
+    keypad.getKeys();
 
     doorlockFX.update();
     if(!matrixAlertBusy()) matrixFX.update();
@@ -1027,6 +1033,8 @@ void HA_MQTT_Init() {
   device.setSoftwareVersion(BUILD);
   device.setConfigurationUrl(configUrl.c_str());
 
+  //----------------------------Buttons
+
   DevModeCMD.setName("Reboot into Dev Mode");
   DevModeCMD.setIcon("mdi:microsoft-visual-studio-code");
   DevModeCMD.onCommand(HAButtonsHandler);
@@ -1035,13 +1043,15 @@ void HA_MQTT_Init() {
   RebootCMD.setIcon("mdi:restart");
   RebootCMD.onCommand(HAButtonsHandler);
 
-  MuteCMD.setName("Mute");
-  MuteCMD.setIcon("mdi:volume-mute");
-  MuteCMD.onCommand(HAButtonsHandler);
-
   UnlockDoorCMD.setName("Unlock Door");
   UnlockDoorCMD.setIcon("mdi:lock-open-variant");
   UnlockDoorCMD.onCommand(HAButtonsHandler);
+
+  StopSoundsCMD.setName("Stop Sounds");
+  StopSoundsCMD.setIcon("mdi:volume-low");
+  StopSoundsCMD.onCommand(HAButtonsHandler);
+
+  //----------------------------Sensors
 
   PIR1.setName("Hallway Presence");
   PIR1.setDeviceClass("motion");
@@ -1070,6 +1080,8 @@ void HA_MQTT_Init() {
   Humd.setIcon("mdi:water-percent");
   Humd.setUnitOfMeasurement("%");
 
+  //----------------------------Alert Buttons
+
   gate_opened_alert.setName("Gate Opened Alert");
   gate_opened_alert.setIcon("mdi:alert-box");
   gate_opened_alert.onCommand(Gate_Opened_Alert);
@@ -1077,6 +1089,10 @@ void HA_MQTT_Init() {
   lstair_pres_alert.setName("Lower Stair Presence Alert");
   lstair_pres_alert.setIcon("mdi:alert-box");
   lstair_pres_alert.onCommand(LStair_Presence_Alert);
+
+  lstair_cbell_alert.setName("Lower Stair Calling Bell Alert");
+  lstair_cbell_alert.setIcon("mdi:alert-box");
+  lstair_cbell_alert.onCommand(LStair_Cbell_Alert);
 
   ustair_pres_alert.setName("Upper Stair Presence Alert");
   ustair_pres_alert.setIcon("mdi:alert-box");
@@ -1090,6 +1106,8 @@ void HA_MQTT_Init() {
   hall_pir1_alert.setIcon("mdi:alert-box");
   hall_pir1_alert.onCommand(Hall_PIR1_Alert);
 
+  //----------------------------Switches
+
   Buzzer1CMD.setName("Buzzer 1");
   Buzzer1CMD.setIcon("mdi:bell");
   Buzzer1CMD.onCommand(HASwitchHandler);
@@ -1097,6 +1115,20 @@ void HA_MQTT_Init() {
   Buzzer2CMD.setName("Buzzer 2");
   Buzzer2CMD.setIcon("mdi:bell");
   Buzzer2CMD.onCommand(HASwitchHandler);
+
+  MuteCMD.setName("Mute");
+  MuteCMD.setIcon("mdi:volume-mute");
+  MuteCMD.onCommand(HASwitchHandler);
+
+  DisMAlertsCMD.setName("Disable Matrix Alerts");
+  DisMAlertsCMD.setIcon("mdi:blur-off");
+  DisMAlertsCMD.onCommand(HASwitchHandler);
+
+  DisDAlertsCMD.setName("Disable Doorlock Alerts");
+  DisDAlertsCMD.setIcon("mdi:square-off-outline");
+  DisDAlertsCMD.onCommand(HASwitchHandler);
+
+  //----------------------------Lights
 
   DoorlockRGBCMD.setName("Doorlock RGB Strip");
   DoorlockRGBCMD.setBrightnessScale(100);
@@ -1151,7 +1183,7 @@ void HA_MQTT_Init() {
 }
 
 void onMqttDisconnected() {
-  DEBUG_PRINTLN("onMqttDisconnected - Disconnected from the broker!");//todo
+  DEBUG_PRINTLN("onMqttDisconnected - Disconnected from the broker!");
 }
 
 void HAButtonsHandler(HAButton* sender)
@@ -1167,15 +1199,15 @@ void HAButtonsHandler(HAButton* sender)
   {
     ESP.restart();
   } 
-  if(sender == &MuteCMD) 
-  {
-    // Handle mute command todo
-  }
   else if(sender == &UnlockDoorCMD) 
   {
     DEBUG_PRINTLN("HAButtonsHandler - Unlock Command Received");
     UnlockDoor_Now = true;
   } 
+  if(sender == &StopSoundsCMD) 
+  {
+    //todo
+  }
 }
 
 void HASwitchHandler(bool state, HASwitch* sender)
@@ -1185,12 +1217,10 @@ void HASwitchHandler(bool state, HASwitch* sender)
     if(state) 
     {
       ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, HIGH);
-      DEBUG_PRINTLN("HASwitchHandler - Buzzer 1 ON");
     } 
     else 
     {
       ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, LOW);
-      DEBUG_PRINTLN("HASwitchHandler - Buzzer 1 OFF");
     }
   }
   else if(sender == &Buzzer2CMD) 
@@ -1198,12 +1228,43 @@ void HASwitchHandler(bool state, HASwitch* sender)
     if(state) 
     {
       ExtraIO.digitalWrite(SX1509_BUZZER2_PIN, HIGH);
-      DEBUG_PRINTLN("HASwitchHandler - Buzzer 2 ON");
     } 
     else 
     {
       ExtraIO.digitalWrite(SX1509_BUZZER2_PIN, LOW);
-      DEBUG_PRINTLN("HASwitchHandler - Buzzer 2 OFF");
+    }
+  }
+  else if(sender == &MuteCMD) 
+  {
+    if(state) 
+    {
+      //todo
+    } 
+    else 
+    {
+      //todo
+    }
+  }
+  else if(sender == &DisMAlertsCMD) 
+  {
+    if(state) 
+    {
+      //todo
+    } 
+    else 
+    {
+      //todo
+    }
+  }
+  else if(sender == &DisDAlertsCMD) 
+  {
+    if(state) 
+    {
+      //todo
+    } 
+    else 
+    {
+      //todo
     }
   }
 
@@ -1212,17 +1273,6 @@ void HASwitchHandler(bool state, HASwitch* sender)
 
 //========================================================================================================================================
 //======================= Matrix Led Helper Functions ========================
-//
-//    Led matrix alert patterns
-//
-//    Gate opened               : bottom to top green wave
-//    Lower stair node presence : bottom to top yellow wave
-//    Upper stair node presence : left to right orange wave
-//    Upper stair node lidar    : left to right red wave
-//    Hallway node 1 PIR        : circular yellow wave
-//    Hallway node 2 PIR        : circular orange wave
-//    Room door LIDAR           : circular red wave
-//
 //========================================================================================================================================
 
 uint16_t matrixXY(uint8_t x, uint8_t y) {
@@ -1349,7 +1399,7 @@ void matrixUpdate() {
 }
  
 // ========================================================================================================================================
-// ======================= HA Light / Select Callbacks ========================
+// ======================= HA Light + Select Callbacks ========================
 // ========================================================================================================================================
 
 void DoorlockRGB_State(bool state, HALight* sender) {
@@ -1405,9 +1455,21 @@ void MatrixRGB_Effect(int8_t index, HASelect* sender) {
 }
 
 // ========================================================================================================================================
-// ======================= Doorlock Core Functions ========================
-// ========================================================================================================================================
- 
+// ======================= Matrix Alert Functions ========================
+//
+//    Led matrix alert patterns
+//
+//    Gate opened               : bottom to top green wave
+//    Lower stair node presence : bottom to top yellow wave
+//    Lower stair node cbell    : bottom to top blue wave
+//    Upper stair node presence : left to right orange wave
+//    Upper stair node lidar    : left to right red wave
+//    Hallway node 1 PIR        : circular yellow wave
+//    Hallway node 2 PIR        : circular orange wave
+//    Room door LIDAR           : circular red wave
+//
+//========================================================================================================================================
+
 void Gate_Opened_Alert(bool state, HASwitch* sender) {
   //bottom to top green wave
   if(state)
@@ -1419,6 +1481,12 @@ void Gate_Opened_Alert(bool state, HASwitch* sender) {
     matrixStopEffect();
   }
   sender->setState(state);
+
+  lstair_pres_alert.setState(false);
+  lstair_cbell_alert.setState(false);
+  ustair_pres_alert.setState(false);
+  ustair_lidar_alert.setState(false);
+  hall_pir1_alert.setState(false);
 }
  
 void LStair_Presence_Alert(bool state, HASwitch* sender) {
@@ -1432,8 +1500,32 @@ void LStair_Presence_Alert(bool state, HASwitch* sender) {
     matrixStopEffect();
   }
   sender->setState(state);
+
+  gate_opened_alert.setState(false);
+  lstair_cbell_alert.setState(false);
+  ustair_pres_alert.setState(false);
+  ustair_lidar_alert.setState(false);
+  hall_pir1_alert.setState(false);
 }
  
+void LStair_Cbell_Alert(bool state, HASwitch* sender) {
+  //blue 
+  if(state)
+  {
+    matrixStartEffect(EFFECT_BOTTOM_TOP, HUE_BLUE);
+  }
+  else
+  {
+    matrixStopEffect();
+  }
+  sender->setState(state);
+
+  gate_opened_alert.setState(false);
+  ustair_pres_alert.setState(false);
+  ustair_lidar_alert.setState(false);
+  hall_pir1_alert.setState(false);
+}
+
 void UStair_Presence_Alert(bool state, HASwitch* sender) {
   //left to right orange wave
   if(state)
@@ -1445,6 +1537,12 @@ void UStair_Presence_Alert(bool state, HASwitch* sender) {
     matrixStopEffect();
   }
   sender->setState(state);
+
+  gate_opened_alert.setState(false);
+  lstair_pres_alert.setState(false);
+  lstair_cbell_alert.setState(false);
+  ustair_lidar_alert.setState(false);
+  hall_pir1_alert.setState(false);
 }
  
 void UStair_Lidar_Alert(bool state, HASwitch* sender) {
@@ -1458,6 +1556,12 @@ void UStair_Lidar_Alert(bool state, HASwitch* sender) {
     matrixStopEffect();
   }
   sender->setState(state);
+
+  gate_opened_alert.setState(false);
+  lstair_pres_alert.setState(false);
+  lstair_cbell_alert.setState(false);
+  ustair_pres_alert.setState(false);
+  hall_pir1_alert.setState(false);
 }
  
 void Hall_PIR1_Alert(bool state, HASwitch* sender) {
@@ -1471,6 +1575,12 @@ void Hall_PIR1_Alert(bool state, HASwitch* sender) {
     matrixStopEffect();
   }
   sender->setState(state);
+
+  gate_opened_alert.setState(false);
+  lstair_pres_alert.setState(false);
+  lstair_cbell_alert.setState(false);
+  ustair_pres_alert.setState(false);
+  ustair_lidar_alert.setState(false);
 }
  
 void Hall_PIR2_Alert(bool state) {
@@ -1483,6 +1593,13 @@ void Hall_PIR2_Alert(bool state) {
   {
     matrixStopEffect();
   }
+
+  gate_opened_alert.setState(false);
+  lstair_pres_alert.setState(false);
+  lstair_cbell_alert.setState(false);
+  ustair_pres_alert.setState(false);
+  ustair_lidar_alert.setState(false);
+  hall_pir1_alert.setState(false);
 }
  
 void Door_Lidar_Alert(bool state) {
@@ -1495,7 +1612,24 @@ void Door_Lidar_Alert(bool state) {
   {
     matrixStopEffect();
   }
+  
+  gate_opened_alert.setState(false);
+  lstair_pres_alert.setState(false);
+  lstair_cbell_alert.setState(false);
+  ustair_pres_alert.setState(false);
+  ustair_lidar_alert.setState(false);
+  hall_pir1_alert.setState(false);
 }
+
+// ========================================================================================================================================
+// ======================= Doorlock Alert Functions ========================
+// ========================================================================================================================================
+ 
+//todo add gate opened, calling bell, lower stair presence, upper stair presence animations for doorlock leds
+
+// ========================================================================================================================================
+// ======================= Doorlock Core Functions ========================
+// ========================================================================================================================================
 
 void LockHandler() {
 
@@ -1531,11 +1665,41 @@ void LockHandler() {
 //======================= GUI and Input Functions ========================
 //========================================================================================================================================
 
-void Keypad_Handler() {
-  char key = keypad.getKey();
-  if(key != NO_KEY) {
-    Serial.println(key);
-    DEBUG_PRINTLN("Keypad_Handler - Key Pressed: " + String(key));
+void keyEventListener(KeypadEvent key, KeyState kpadState) {
+
+  if(!TransmitAudioBTNHeld && kpadState == HOLD && key == '*')
+  {
+    ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, HIGH);
+    delay(100);
+    ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, LOW);
+    TransmitAudioBTNHeld = true;
+    DEBUG_PRINTLN("keyEventListener - TransmitAudioBTNHeld = true");
+  }
+  else if(TransmitAudioBTNHeld && kpadState == IDLE && key == '*')
+  {
+    ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, HIGH);
+    delay(100);
+    ExtraIO.digitalWrite(SX1509_BUZZER1_PIN, LOW);
+    TransmitAudioBTNHeld = false;
+    DEBUG_PRINTLN("keyEventListener - TransmitAudioBTNHeld = false");
+  }
+
+  DEBUG_PRINT("keyEventListener - Key ");
+  DEBUG_PRINT(key);
+  switch(kpadState)
+  {
+    case PRESSED:    
+      DEBUG_PRINTLN(" PRESSED.");
+      break;
+    case HOLD:
+      DEBUG_PRINTLN(" HOLD.");
+      break;
+    case RELEASED:
+      DEBUG_PRINTLN(" RELEASED.");
+      break;
+    case IDLE:
+      DEBUG_PRINTLN(" IDLE.");
+      break;
   }
 }
 
@@ -1563,65 +1727,37 @@ void Intercom_Task(void *param) {
 
   while(true)
   {
-    // do we need to start transmitting?
-    if(digitalRead(DevBTN))//todo must be moved to a keypad button or something 
+    if(digitalRead(DevBTN) || TransmitAudioBTNHeld)
     {
       DEBUG_PRINTLN("Intercom_Task - Started transmitting");
 
-      // stop the output as we're switching into transmit mode
+      // transmit for at least 1 second or while the button is pushed
       m_output->stop();
-
-      tft.startWrite();           // take the TFT bus mutex
-      gpio_reset_pin(GPIO_NUM_4); // detach from TFT_WR function
-      gpio_set_direction(GPIO_NUM_4, GPIO_MODE_INPUT);
-
-      // start the input to get samples from the microphone
       m_input->start();
 
-      // transmit for at least 1 second or while the button is pushed
       unsigned long start_time = millis();
-      while (millis() - start_time < 1000 || digitalRead(DevBTN))
+      uint32_t total = 0;
+      while(millis() - start_time < 1000 || TransmitAudioBTNHeld)
       {
-        // read samples from the microphone
-        int samples_read = m_input->read(samples, 128);  
-
-        // debug: print min/max of what mic gives us
-        int16_t mn = 32767, mx = -32768;
-        for (int i = 0; i < samples_read; i++) {
-            if (samples[i] < mn) mn = samples[i];
-            if (samples[i] > mx) mx = samples[i];
-        }
-        Serial.printf("Mic: read=%d min=%d max=%d\n", samples_read, mn, mx);
-
-
-        // and send them over the transport
-        for (int i = 0; i < samples_read; i++)
-        {
-          m_transport->add_sample(samples[i]);
-        }
+        int n = m_input->read(samples, 128);
+        for(int i = 0; i < n; i++) m_transport->add_sample(samples[i]);
+        total += n;
       }
-      // send all packets still in the transport buffer
+      unsigned long ms = millis() - start_time;
+
       m_transport->flush();
-
-      // finished transmitting stop the input and start the output
-      DEBUG_PRINTLN("Intercom_Task - Finished transmitting");
       m_input->stop();
-
-      gpio_reset_pin(GPIO_NUM_4);
-      tft.endWrite(); // release TFT bus mutex
-
       m_output->start(SAMPLE_RATE);
+      Serial.printf("Sent %u samples in %lu ms = %.0f Hz (want %d)\n", (unsigned)total, ms, total * 1000.0 / ms, SAMPLE_RATE);
+      TransmitAudioNow = false;
+      DEBUG_PRINTLN("Intercom_Task - Finished transmitting");
     }
-    // while the transmit button is not pushed and 1 second has not elapsed
-    DEBUG_PRINTLN("Intercom_Task - Started Receiving");
-    unsigned long start_time = millis();
-    while(millis() - start_time < 1000 || !digitalRead(DevBTN))
-    {
-      // read from the output buffer (which should be getting filled by the transport)
-      m_output_buffer->remove_samples(samples, 128);
 
-      // and send the samples to the speaker
-      m_output->write(samples, 128);
+    DEBUG_PRINTLN("Intercom_Task - Started Receiving");
+    while(!digitalRead(DevBTN) && !TransmitAudioBTNHeld)
+    {
+      m_output_buffer->remove_samples(samples, 128); // read from the output buffer (which should be getting filled by the transport)
+      m_output->write(samples, 128); // and send the samples to the speaker
     }
     DEBUG_PRINTLN("Intercom_Task - Finished Receiving");
   }

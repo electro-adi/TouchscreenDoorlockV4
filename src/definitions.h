@@ -107,6 +107,7 @@ int Matrix_LEDS[MATRIX_LEDS_NUM] = {26, 27, 28, 29, 30, 31, 32, 33, 34};
 #define HUE_ORANGE      5461
 #define HUE_YELLOW      9929
 #define HUE_GREEN       21845
+#define HUE_BLUE        43690
  
 enum MatrixEffectType : uint8_t {
   EFFECT_NONE,
@@ -166,6 +167,7 @@ unsigned long UnlockingStarted_Time;
 //-----------------------------------------Intercom Stuff
 
 #define SAMPLE_RATE 16000
+#define ADC_RATE_DIVIDER 2.0f
 
 #define ADC_MIC_CHANNEL ADC1_CHANNEL_6
 
@@ -173,6 +175,8 @@ unsigned long UnlockingStarted_Time;
 // specify TRANSPORT_HEADER_SIZE (the length in bytes of the header) in the next line, and define the transport header
 #define TRANSPORT_HEADER_SIZE 3
 uint8_t transport_header[TRANSPORT_HEADER_SIZE] = {0x1F, 0xCD, 0x01};
+
+bool TransmitAudioBTNHeld = false;
 
 //-----------------------------------------Pins
 

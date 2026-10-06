@@ -3,6 +3,11 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 
+// Output gain applied to the 8-bit samples (original project: 32). Raise for more volume.
+#ifndef SPEAKER_GAIN
+  #define SPEAKER_GAIN 128
+#endif
+
 /**
  * @brief Circular buffer for 8 bit unsigned PCM samples
  * 
@@ -93,7 +98,9 @@ public:
         m_buffering = false;
         // just send back the samples we've got and move the read head forward
         int16_t sample = m_buffer[m_read_head];
-        samples[i] = (sample - 128) << 5;
+        // speaker volume: 256 = same level the sender transmitted, 32 = old (quiet) behaviour
+        int32_t v = ((int32_t)sample - 128) * SPEAKER_GAIN;
+        samples[i] = (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
         m_read_head = (m_read_head + 1) % m_buffer_size;
         m_available_samples--;
       }
