@@ -20,7 +20,7 @@ void I2SOutput::start(uint32_t sample_rate)
         .use_apll = false,
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0,
-        .mclk_multiple = I2S_MCLK_MULTIPLE_DEFAULT, // Unused
+        .mclk_multiple = I2S_MCLK_MULTIPLE_256, // unused
         .bits_per_chan = I2S_BITS_PER_CHAN_DEFAULT // Use bits per sample
         };
         

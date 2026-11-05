@@ -1,3 +1,4 @@
+/*
 #pragma once
 
 #include "Transport.h"
@@ -14,3 +15,4 @@ public:
   virtual bool begin() override;
   friend void receiveCallback(const uint8_t *macAddr, const uint8_t *data, int dataLen);
 };
+*/
